@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Flappy Bird — Q-Learning (Single Fit-to-View, Fixed Pass Counting)</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#0f1730; --ink:#e8eefc; --muted:#9fb3ff;
+    --accent:#7ee787; --warn:#ff7b72; --gold:#ffd166; --pipe:#6bd16b; --bird:#ffd166;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+
+  /* Layout: controls left, view right */
+  #wrap{
+    position:fixed; inset:0;
+    display:grid; grid-template-columns:minmax(280px,340px) 1fr;
+    min-height:100vh;
+  }
+  aside{
+    background:var(--panel); padding:14px; border-right:1px solid #152347; overflow:auto;
+  }
+  h1{font-size:18px;margin:8px 0 12px}
+  h2{font-size:13px;opacity:.85;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em}
+  .row{display:flex; gap:10px; align-items:center; margin:6px 0}
+  .row > label{flex:1; opacity:.9}
+  .row > input[type="range"]{flex:1.25}
+  .small{font-size:12px; color:var(--muted)}
+  .btns{display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 6px}
+  button{
+    background:#1b2a55; color:var(--ink); border:1px solid #233566; border-radius:10px;
+    padding:8px 12px; cursor:pointer
+  }
+  button.primary{background:#23407a; border-color:#3259a9}
+  button:disabled{opacity:.5; cursor:not-allowed}
+  .pill{display:inline-flex; gap:6px; align-items:center; padding:6px 8px; border:1px solid #1d2d58; border-radius:999px}
+  .meters{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:8px}
+  .card{border:1px solid #1a2a4f; border-radius:12px; padding:10px; background:#0f1730}
+  .sw{width:28px;height:14px; background:#233; border-radius:999px; position:relative}
+  .dot{width:12px;height:12px;border-radius:50%;background:#6aa2ff; position:absolute; top:1px; left:1px; transition:transform .15s}
+  input[type="checkbox"]{display:none}
+  input[type="checkbox"]:checked + .sw .dot{transform:translateX(14px)}
+
+  /* Right panel with one responsive canvas that always shows the whole world */
+  main{position:relative; padding:12px}
+  #viewWrap{
+    position:absolute; inset:12px;
+    display:grid; grid-template-rows:auto 1fr; gap:8px;
+  }
+  #viewTitle{font-size:12px;color:var(--muted)}
+  #viewBox{
+    position:relative; border:1px solid #1a2a4f; border-radius:12px; background:#0f1730;
+    box-shadow:0 8px 24px rgba(0,0,0,0.35); overflow:hidden;
+  }
+  /* Canvas fills the box; JS handles pixel density & world scaling */
+  #view{width:100%; height:100%; display:block; background:#0b1020}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <aside>
+    <h1>Flappy Bird — Q-Learning</h1>
+    <div class="btns">
+      <button id="btnStart" class="primary">Start</button>
+      <button id="btnPause">Pause</button>
+      <button id="btnReset">Reset</button>
+    </div>
+
+    <h2>Training</h2>
+    <div class="row">
+      <label>Exploration ε: <span id="epsVal">0.10</span></label>
+      <input id="eps" type="range" min="0" max="1" step="0.01" value="0.10">
+    </div>
+    <div class="row">
+      <label>Learning rate α: <span id="alphaVal">0.20</span></label>
+      <input id="alpha" type="range" min="0.01" max="1" step="0.01" value="0.20">
+    </div>
+    <div class="row">
+      <label>Discount γ: <span id="gammaVal">0.99</span></label>
+      <input id="gamma" type="range" min="0.8" max="0.999" step="0.001" value="0.99">
+    </div>
+    <div class="row">
+      <label>Pace (steps/frame): <span id="paceVal">3</span></label>
+      <input id="pace" type="range" min="1" max="200" step="1" value="3">
+    </div>
+
+    <h2>Rewards</h2>
+    <div class="row">
+      <label>Pass Pipe Reward: <span id="rPassVal">+10</span></label>
+      <input id="rPass" type="range" min="1" max="50" step="1" value="10">
+    </div>
+    <div class="row">
+      <label>Alive Step Reward: <span id="rAliveVal">+0.1</span></label>
+      <input id="rAlive" type="range" min="-0.5" max="0.5" step="0.01" value="0.10">
+    </div>
+    <div class="row">
+      <label>Crash Penalty: <span id="rCrashVal">-20</span></label>
+      <input id="rCrash" type="range" min="-200" max="-1" step="1" value="-20">
+    </div>
+
+    <h2>Options</h2>
+    <div class="row">
+      <label class="pill">
+        <input id="renderToggle" type="checkbox" checked>
+        <span class="sw"><span class="dot"></span></span> Render
+      </label>
+      <label class="pill">
+        <input id="controlToggle" type="checkbox">
+        <span class="sw"><span class="dot"></span></span> Human (Space)
+      </label>
+    </div>
+
+    <div class="meters">
+      <div class="card"><div class="small">Generation</div><div id="gen">1</div></div>
+      <div class="card"><div class="small">Best Score</div><div id="best">0</div></div>
+      <div class="card"><div class="small">Avg Score (100)</div><div id="avg">0.00</div></div>
+      <div class="card"><div class="small">Q-states</div><div id="states">0</div></div>
+      <div class="card"><div class="small">Alive / Total</div><div><span id="alive">0</span> / <span id="total">0</span></div></div>
+      <div class="card"><div class="small">Leader Score(generation)</div><div id="leader">0</div></div>
+    </div>
+
+    <p class="small">Accurate pass counting with unique pipe IDs. Generation increments when all agents die and a new run begins.</p>
+  </aside>
+
+  <main>
+    <div id="viewWrap">
+      <div id="viewTitle">Full World View (fit to box)</div>
+      <div id="viewBox">
+        <canvas id="view"></canvas>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(() => {
+  // ===== World design resolution (logic space) =====
+  const WORLD_W = 960;
+  const WORLD_H = 1280;
+
+  // ===== UI =====
+  const $ = id => document.getElementById(id);
+  const ui = {
+    btnStart: $('btnStart'), btnPause: $('btnPause'), btnReset: $('btnReset'),
+    eps: $('eps'), epsVal: $('epsVal'),
+    alpha: $('alpha'), alphaVal: $('alphaVal'),
+    gamma: $('gamma'), gammaVal: $('gammaVal'),
+    pace: $('pace'),  paceVal: $('paceVal'),
+    rPass: $('rPass'), rPassVal: $('rPassVal'),
+    rAlive: $('rAlive'), rAliveVal: $('rAliveVal'),
+    rCrash: $('rCrash'), rCrashVal: $('rCrashVal'),
+    renderToggle: $('renderToggle'), controlToggle: $('controlToggle'),
+    gen: $('gen'), ep: $('ep'), best: $('best'), avg: $('avg'), states: $('states'),
+    alive: $('alive'), total: $('total'), leader: $('leader'),
+  };
+  function bindRange(input, label, fmt=x=>String(x)){
+    const sync = () => label.textContent = fmt(input.value);
+    input.addEventListener('input', sync); sync();
+  }
+  bindRange(ui.eps, ui.epsVal, v=>(+v).toFixed(2));
+  bindRange(ui.alpha, ui.alphaVal, v=>(+v).toFixed(2));
+  bindRange(ui.gamma, ui.gammaVal, v=>(+v).toFixed(3));
+  bindRange(ui.pace, ui.paceVal,   v=>String(Math.round(+v)));
+  bindRange(ui.rPass, ui.rPassVal, v=>'+'+Math.round(+v));
+  bindRange(ui.rAlive,ui.rAliveVal,v=>((+v>=0?'+':'')+(+v).toFixed(2)));
+  bindRange(ui.rCrash,ui.rCrashVal,v=>String(Math.round(+v)));
+
+  // ===== Single canvas that always shows full world =====
+  const view = $('view');
+  const vtx  = view.getContext('2d');
+
+  function resizeCanvasToBox(){
+    const box = view.parentElement.getBoundingClientRect();
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1)); // clamp for perf
+    view.width  = Math.max(1, Math.floor(box.width  * dpr));
+    view.height = Math.max(1, Math.floor(box.height * dpr));
+    vtx.setTransform(1,0,0,1,0,0);
+  }
+  window.addEventListener('resize', resizeCanvasToBox, {passive:true});
+  resizeCanvasToBox();
+
+  function computeFit(){
+    const sx = view.width  / WORLD_W;
+    const sy = view.height / WORLD_H;
+    const scale = Math.min(sx, sy);
+    const offX = (view.width  - WORLD_W*scale)/2;
+    const offY = (view.height - WORLD_H*scale)/2;
+    return {scale, offX, offY};
+  }
+
+  // ===== Game constants =====
+  const POP = 20;
+  const G = 0.4;
+  const FLAP_V = -6.0;
+  const PIPE_GAP = 200;     // exact visible opening height
+  const PIPE_W = 50;
+  const PIPE_SPACING = 300;
+  const PIPE_SPEED = 3.0;
+  const GROUND_H = 80;
+  const FLOOR = WORLD_H - GROUND_H;
+
+  // Gap helpers: ensure full 200px gap between y=0 and y=FLOOR
+  function clampGapY(y){
+    const half = PIPE_GAP/2;
+    return Math.max(half, Math.min(FLOOR - half, y));
+  }
+  function randomGapY(){
+    const half = PIPE_GAP/2;
+    return half + Math.random() * (FLOOR - PIPE_GAP);
+  }
+
+  // Unique pipe IDs to count passes robustly
+  let pipeSeq = 0;
+  function makePipe(x, maybeGapY){
+    return { id: ++pipeSeq, x, gapY: clampGapY(maybeGapY != null ? maybeGapY : randomGapY()) };
+  }
+
+  // ===== Env state =====
+  let birds = [];
+  let pipes = [];
+  let generation = 1;     // NEW: generation counter
+  let best = 0, totalScores = [];
+  let running = false;
+
+  function makeBird(id){
+    return {
+      id, x: WORLD_W/2, y: WORLD_H/2, vy: 0, r: 8,
+      alive: true, score: 0, passedSet: new Set(), _key:null, _action:null
+    };
+  }
+  function resetBirds(){ birds = Array.from({length: POP}, (_,i)=>makeBird(i)); }
+  function resetPipes(){
+    pipes = [];
+    let x = WORLD_W + 200;
+    for(let i=0;i<4;i++){ pipes.push(makePipe(x)); x += PIPE_SPACING; }
+  }
+  function resetEnv(){ resetBirds(); resetPipes(); }
+  function spawnNextPipe(){ const last = pipes[pipes.length-1]; pipes.push(makePipe(last.x + PIPE_SPACING)); }
+
+  // ===== Q-learning (shared table) =====
+  const Q = new Map();
+  function discretize(dx, dy, vy){
+    const b=(v,step,min=-999,max=999)=>Math.round(Math.max(min,Math.min(max,v))/step);
+    return [b(dx,60,-600,600), b(dy,40,-600,600), b(vy,2,-40,40)].join('|');
+  }
+  function getQ(s){ if(!Q.has(s)) Q.set(s,[0,0]); return Q.get(s); }
+  function policy(stateKey, eps){ return Math.random()<eps ? (Math.random()<0.5?0:1) : (getQ(stateKey)[1]>getQ(stateKey)[0]?1:0); }
+  function currentPipeForX(x, r=8){ for(const p of pipes) if(p.x + PIPE_W >= x - r) return p; return pipes[0]; }
+
+  function collide(b){
+    if(b.y - b.r < 0) return true;
+    if(b.y + b.r > FLOOR) return true;
+    for(const p of pipes){
+      if(b.x + b.r > p.x && b.x - b.r < p.x + PIPE_W){
+        const topH = p.gapY - PIPE_GAP/2, botY = p.gapY + PIPE_GAP/2;
+        if(b.y - b.r < topH || b.y + b.r > botY) return true;
+      }
+    }
+    return false;
+  }
+  function aliveCount(){ return birds.reduce((n,b)=>n+(b.alive?1:0),0); }
+
+  function stepAll(actions, rewards){
+    // physics
+    for(let i=0;i<birds.length;i++){
+      const b = birds[i];
+      if(!b.alive) continue;
+      if(actions[i]===1) b.vy = FLAP_V;
+      b.vy += G; b.y += b.vy;
+    }
+    // pipes once
+    for(const p of pipes) p.x -= PIPE_SPEED;
+    if(pipes[0].x + PIPE_W < -10){ pipes.shift(); spawnNextPipe(); }
+
+    // rewards & pass counting with unique pipe IDs
+    const results = birds.map(b=>{
+      if(!b.alive) return {reward:0, done:true};
+      let r = +rewards.alive;
+
+      // Count each pipe exactly once per bird
+      for(const p of pipes){
+        if(!b.passedSet.has(p.id) && (p.x + PIPE_W < b.x - b.r)){
+          b.passedSet.add(p.id);
+          b.score += 1;
+          r += +rewards.pass;
+        }
+      }
+
+      if(collide(b)){ b.alive=false; r += +rewards.crash; return {reward:r, done:true}; }
+      return {reward:r, done:false};
+    });
+    return results;
+  }
+
+  function episodeReset(){
+    const leaderScore = birds.reduce((m,b)=>Math.max(m,b.score),0);
+    totalScores.push(leaderScore); if(totalScores.length>100) totalScores.shift();
+    best = Math.max(best, leaderScore);
+    // NEW: advance generation when all agents died (i.e., start a brand new run)
+    generation++;
+    resetEnv();
+  }
+
+  function observeState(b){
+    const p=currentPipeForX(b.x,b.r);
+    return discretize((p.x+PIPE_W/2)-b.x, p.gapY-b.y, b.vy);
+  }
+
+  // ===== UI update =====
+  function updateUI(){
+    ui.gen.textContent = generation;
+    ui.best.textContent = best;
+    ui.avg.textContent = (totalScores.length? totalScores.reduce((a,b)=>a+b,0)/totalScores.length : 0).toFixed(2);
+    ui.states.textContent = Q.size;
+    ui.alive.textContent = aliveCount();
+    ui.total.textContent = birds.length;
+    ui.leader.textContent = birds.reduce((m,b)=>Math.max(m,b.score),0);
+  }
+
+  // ===== Render full world to the single canvas (always fits) =====
+  function draw(){
+    const {scale, offX, offY} = computeFit();
+    vtx.setTransform(1,0,0,1,0,0);
+    vtx.clearRect(0,0,view.width, view.height);
+    vtx.translate(offX, offY);
+    vtx.scale(scale, scale);
+
+    // Background gradient
+    const grad = vtx.createLinearGradient(0,0,0,WORLD_H);
+    grad.addColorStop(0, '#2a3a6f'); grad.addColorStop(1, '#0b1020');
+    vtx.fillStyle = grad; vtx.fillRect(0,0,WORLD_W, WORLD_H);
+
+    // Pipes (draw to FLOOR)
+    const pipeColor = getComputedStyle(document.documentElement).getPropertyValue('--pipe').trim() || '#6bd16b';
+    vtx.fillStyle = pipeColor;
+    for(const p of pipes){
+      const gy = clampGapY(p.gapY);
+      const topH = gy - PIPE_GAP/2, botY = gy + PIPE_GAP/2;
+      if(topH > 0) vtx.fillRect(p.x, 0, PIPE_W, topH);
+      if(botY < FLOOR) vtx.fillRect(p.x, botY, PIPE_W, FLOOR - botY);
+      p.gapY = gy; // keep sanitized
+    }
+
+    // Ground
+    vtx.fillStyle = "#0c132a";
+    vtx.fillRect(0, FLOOR, WORLD_W, WORLD_H - FLOOR);
+
+    // Birds
+    const liveColor = getComputedStyle(document.documentElement).getPropertyValue('--bird').trim() || '#ffd166';
+    for(const b of birds){
+      vtx.beginPath();
+      vtx.fillStyle = b.alive ? liveColor : 'rgba(255,255,255,0.15)';
+      vtx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+      vtx.fill();
+    }
+
+    // HUD overlay (world coords so it scales nicely)
+    vtx.fillStyle="rgba(0,0,0,0.25)";
+    vtx.fillRect(0,0,WORLD_W,30);
+    vtx.fillStyle="#e8eefc";
+    vtx.font="16px system-ui,-apple-system,Segoe UI,Roboto,Arial";
+    const leader = birds.reduce((m,b)=>Math.max(m,b.score),0);
+    vtx.fillText(`Gen: ${generation}  |  Alive: ${aliveCount()}/${birds.length}  |  Leader: ${leader}  |  Best: ${best}`, 10, 20);
+  }
+
+  // ===== Loop =====
+  let humanFlap=false;
+  function tick(){
+    const render = ui.renderToggle.checked;
+    if(!running){
+      if(render) draw();
+      requestAnimationFrame(tick);
+      return;
+    }
+
+    const rewards = { pass:+ui.rPass.value, alive:+ui.rAlive.value, crash:+ui.rCrash.value };
+    const eps = +ui.eps.value, alpha = +ui.alpha.value, gamma = +ui.gamma.value;
+    const stepsPerFrame = +ui.pace.value;
+    const human = ui.controlToggle.checked;
+
+    for(let s=0; s<stepsPerFrame; s++){
+      if(aliveCount()===0){ episodeReset(); break; }
+
+      // actions
+      const actions = birds.map(b=>{
+        if(!b.alive) return 0;
+        if(human) return (humanFlap?1:0);
+        const key = observeState(b); b._key = key;
+        const a = policy(key, eps);  b._action = a;
+        return a;
+      });
+      humanFlap = false;
+
+      // step env
+      const results = stepAll(actions, rewards);
+
+      // Q-updates
+      if(!human){
+        for(let i=0;i<birds.length;i++){
+          const b = birds[i]; if(b._key==null) continue;
+          const q = getQ(b._key);
+          const s2 = b.alive ? observeState(b) : b._key;
+          const q2 = getQ(s2);
+          const target = results[i].reward + (results[i].done ? 0 : gamma*Math.max(q2[0], q2[1]));
+          q[b._action] += alpha * (target - q[b._action]);
+          b._key = null; b._action = null;
+        }
+      }
+    }
+
+    if(render) draw();
+    updateUI();
+    requestAnimationFrame(tick);
+  }
+
+  // ===== Input & Buttons =====
+  window.addEventListener('resize', resizeCanvasToBox);
+  window.addEventListener('keydown', (e)=>{
+    if(e.code==='Space'){ humanFlap=true; e.preventDefault(); }
+  });
+  ui.btnStart.onclick = ()=>{ running = true; };
+  ui.btnPause.onclick = ()=>{ running = false; };
+  ui.btnReset.onclick = ()=>{
+    running=false; generation=1; best=0; totalScores.length=0;
+    Q.clear(); resetEnv(); updateUI(); draw();
+  };
+  ui.controlToggle.addEventListener('change', ()=> resetEnv());
+
+  // ===== Init =====
+  resetEnv(); updateUI(); draw(); tick();
+})();
+</script>
+</body>
+</html>
